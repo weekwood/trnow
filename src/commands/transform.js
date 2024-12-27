@@ -50,59 +50,70 @@ const generateKey = (text, style = 'camelCase') => {
     // 移除两端空白
     text = text.trim();
 
-    // 移除特殊字符，保留中文和英文
+    // 将特殊字符替换为下划线，保留中文和英文
     const cleanText = text
-        .replace(/[^\u4e00-\u9fa5a-zA-Z0-9\s]/g, '')
+        .replace(/[^\u4e00-\u9fa5a-zA-Z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '') // 移除首尾的下划线
         .trim();
     
-    // 如果是纯中文，转换为拼音
-    if (/^[\u4e00-\u9fa5]+$/.test(cleanText)) {
-        // 直接使用 jieba 进行分词
-        const words = jieba.cut(cleanText);
-        
-        // 对分词结果转换为拼音
-        const pinyinWords = words.map(word => {
-            const pinyinArray = pinyin(word, {
-                style: pinyin.STYLE_NORMAL,
-                heteronym: false
-            });
-            return pinyinArray.map(p => p[0]).join('');
-        });
-        
-        // 所有拼音转小写
-        const lowerPinyinWords = pinyinWords.map(word => word.toLowerCase());
-        
-        // 根据样式格式化
-        if (style === 'camelCase') {
-            return lowerPinyinWords
-                .map((word, index) => 
-                    index === 0 ? word : 
-                    word.charAt(0).toUpperCase() + word.slice(1)
-                )
-                .join('');
-        }
-        return lowerPinyinWords.join('_');
-    }
-    
     // 处理混合文本
-    const words = cleanText
-        .replace(/([a-z])([A-Z])/g, '$1 $2') // 分割驼峰
-        .toLowerCase()
-        .split(/[\s_-]+/) // 分割单词
-        .filter(Boolean); // 移除空字符串
+    const processSegment = (segment) => {
+        // 检查是否是纯中文
+        if (/^[\u4e00-\u9fa5]+$/.test(segment)) {
+            // 使用 jieba 进行分词
+            const words = jieba.cut(segment);
+            
+            // 对分词结果转换为拼音
+            return words.map(word => {
+                const pinyinArray = pinyin(word, {
+                    style: pinyin.STYLE_NORMAL,
+                    heteronym: false
+                });
+                return pinyinArray.map(p => p[0]).join('');
+            });
+        }
+        
+        // 处理英文
+        if (/^[a-zA-Z][a-zA-Z0-9]*$/.test(segment)) {
+            if (style === 'snake_case') {
+                // 如果目标是 snake_case，把驼峰转换为下划线
+                return segment
+                    .replace(/([a-z])([A-Z])/g, '$1_$2')
+                    .toLowerCase()
+                    .split('_');
+            } else {
+                // 如果目标是 camelCase，保持驼峰格式
+                return [segment];
+            }
+        }
+        
+        // 处理数字
+        return [segment.toLowerCase()];
+    };
     
-    // 所有单词转小写
-    const lowerWords = words.map(word => word.toLowerCase());
+    // 分割中英文
+    const segments = cleanText.split('_').filter(Boolean);
+    
+    // 处理每个片段并合并结果
+    const words = segments.reduce((acc, segment) => {
+        // 进一步分割中英文
+        const subSegments = segment.match(/[\u4e00-\u9fa5]+|[a-zA-Z][a-zA-Z0-9]*|\d+/g) || [];
+        const processed = subSegments.reduce((subAcc, subSegment) => {
+            return [...subAcc, ...processSegment(subSegment)];
+        }, []);
+        return [...acc, ...processed];
+    }, []);
     
     if (style === 'camelCase') {
-        return lowerWords
+        return words
             .map((word, index) => 
-                index === 0 ? word : word.charAt(0).toUpperCase() + word.slice(1)
+                index === 0 ? word.toLowerCase() : 
+                    word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
             )
             .join('');
     }
     
-    return lowerWords.join('_');
+    return words.join('_');
 };
 
 const execute = async (flags) => {
