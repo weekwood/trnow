@@ -2,8 +2,8 @@ const fs = require('fs-extra');
 const path = require('path');
 const pinyin = require('pinyin').default;
 const jieba = require('@node-rs/jieba');
-const crypto = require('crypto');
 const yaml = require('yaml');
+const AIKeyGenerator = require('../utils/ai-key-generator');
 
 // 加载配置文件
 const loadConfig = async (configPath = '.trnow.yml') => {
@@ -38,15 +38,8 @@ const loadExistingMessages = async (flags) => {
     return {};
 };
 
-// 生成唯一的 key
-const generateUniqueKey = (text, existingKeys, style = 'camelCase') => {
-    let key = generateKey(text, style);
-    
-    return key;
-};
-
-// 生成合适的 key
-const generateKey = (text, style = 'camelCase') => {
+// 使用 pinyin + jieba 生成 key
+const generateFallbackKey = (text, style = 'camelCase') => {
     // 移除两端空白
     text = text.trim();
 
@@ -64,25 +57,32 @@ const generateKey = (text, style = 'camelCase') => {
             const words = jieba.cut(segment);
             
             // 对分词结果转换为拼音
-            return words.map(word => {
+            const pinyins = words.map(word => {
                 const pinyinArray = pinyin(word, {
                     style: pinyin.STYLE_NORMAL,
                     heteronym: false
                 });
                 return pinyinArray.map(p => p[0]).join('');
             });
+            
+            // 如果是单个词，直接返回
+            if (pinyins.length === 1) {
+                return pinyins;
+            }
+            
+            // 如果是多个词，每个词作为独立的部分
+            return pinyins;
         }
         
         // 处理英文
-        if (/^[a-zA-Z][a-zA-Z0-9]*$/.test(segment)) {
+        if (/^[a-zA-Z0-9]+$/.test(segment)) {
             if (style === 'snake_case') {
-                // 如果目标是 snake_case，把驼峰转换为下划线
                 return segment
                     .replace(/([a-z])([A-Z])/g, '$1_$2')
                     .toLowerCase()
                     .split('_');
             } else {
-                // 如果目标是 camelCase，保持驼峰格式
+                // camelCase 模式下保持原有
                 return [segment];
             }
         }
@@ -106,10 +106,14 @@ const generateKey = (text, style = 'camelCase') => {
     
     if (style === 'camelCase') {
         return words
-            .map((word, index) => 
-                index === 0 ? word.toLowerCase() : 
-                    word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
-            )
+            .map((word, index) => {
+                // 只处理首字母大小写，保持其余部分不变
+                if (index === 0) {
+                    return word.charAt(0).toLowerCase() + word.slice(1);
+                } else {
+                    return word.charAt(0).toUpperCase() + word.slice(1);
+                }
+            })
             .join('');
     }
     
@@ -121,6 +125,7 @@ const execute = async (flags) => {
     
     // 加载配置文件
     const config = await loadConfig(flags.config);
+    const aiGenerator = new AIKeyGenerator(config.keyGeneration.ai);
     
     // 设置默认值
     const options = {
@@ -169,11 +174,34 @@ const execute = async (flags) => {
         errors: []
     };
     
+    // 收集需要生成 key 的文本
+    const textsNeedingKeys = [];
+    scanResults.forEach((item) => {
+        const existingEntry = Object.entries(existingMessages)
+            .find(([_, value]) => value === item.text);
+        
+        if (!existingEntry) {
+            textsNeedingKeys.push(item.text);
+        }
+    });
+
+    // 批量生成 key
+    let aiKeyMap = new Map();
+    if (textsNeedingKeys.length > 0 && config.keyGeneration.ai.enabled && config.keyGeneration.ai.apiKey) {
+        aiKeyMap = await aiGenerator.generateKeys(textsNeedingKeys, options.keyStyle) || new Map();
+    }
+
+    // 为所有需要的文本生成 key
+    const keyMap = new Map();
+    textsNeedingKeys.forEach(text => {
+        const key = aiKeyMap.get(text) || generateFallbackKey(text, options.keyStyle);
+        keyMap.set(text, key);
+    });
+
     // 生成 key-value 映射
     const messages = {
         ...existingMessages
     };
-    const keyMap = new Map();
     const existingKeys = new Set(Object.keys(existingMessages));
     
     scanResults.forEach((item) => {
@@ -188,10 +216,9 @@ const execute = async (flags) => {
             return;
         }
         
-        // 只为新文本生成 key
-        const key = generateUniqueKey(item.text, existingKeys, options.keyStyle);
+        // 使用已生成的 key
+        const key = keyMap.get(item.text);
         messages[key] = item.text;
-        keyMap.set(item.text, key);
         existingKeys.add(key);
         
         report.newKeys.push(key);
@@ -242,10 +269,9 @@ const execute = async (flags) => {
 
 // 替换文件中的文本
 const replaceInFile = async (file, keyMap) => {
-    // 确保文件路径存在
     const filePath = typeof file === 'string' ? file : file.file;
     if (!filePath) {
-        return; // 跳过无效的文件
+        return;
     }
 
     const content = await fs.readFile(filePath, 'utf-8');
@@ -264,7 +290,7 @@ const replaceInFile = async (file, keyMap) => {
             
             // 替换文本节点
             newContent = newContent.replace(
-                `>${text}<`,
+                new RegExp(`>\\s*${text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*<`, 'g'),
                 `>{t('${key}')}<`
             );
             
@@ -275,27 +301,44 @@ const replaceInFile = async (file, keyMap) => {
             );
         }
     } else if (fileType === '.vue' || fileType === 'template') {
-        // Vue 模板转换逻辑
+        // 替换 Vue 模板中的文本
         for (const [text, key] of keyMap.entries()) {
-            // 替换属性中的文本
+            // 处理普通属性
             newContent = newContent.replace(
-                `="${text}"`,
-                `:="${'$t(\'' + key + '\')'}"`
+                new RegExp(`(\\w+)="` + text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + `"`, 'g'),
+                `:$1="$t('${key}')"`
+            );
+            // 处理已经是绑定属性的情况
+            newContent = newContent.replace(
+                new RegExp(`:(\\w+)="` + text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + `"`, 'g'),
+                `:$1="$t('${key}')"`
             );
             
             // 替换文本节点
             newContent = newContent.replace(
-                `>${text}<`,
+                new RegExp(`>\\s*${text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*<`, 'g'),
                 `>{{ $t('${key}') }}<`
             );
             
-            // 替换 v-text 和 v-html
+            // 处理带引号的字符串字面量
             newContent = newContent.replace(
-                `v-text="${text}"`,
+                new RegExp(`v-text="'${text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'"`, 'g'),
                 `v-text="$t('${key}')"`
             ).replace(
-                `v-html="${text}"`,
+                new RegExp(`v-html="'${text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'"`, 'g'),
                 `v-html="$t('${key}')"`
+            );
+            
+            // 处理带引号的属性值
+            newContent = newContent.replace(
+                new RegExp(`:(\\w+)="'${text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'"`, 'g'),
+                `:$1="$t('${key}')"`
+            );
+
+            // 处理 script 中的字符串
+            newContent = newContent.replace(
+                new RegExp(`(\\w+):\\s*['"]${text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}['"]`, 'g'),
+                `$1: this.$t('${key}')`
             );
         }
     }
@@ -344,5 +387,6 @@ const backupFiles = async (files) => {
 };
 
 module.exports = {
-    execute
+    execute,
+    generateFallbackKey
 }; 

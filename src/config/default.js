@@ -39,13 +39,25 @@ module.exports = {
         'dist',
         '**/*.test.{js,jsx,ts,tsx}'
     ],
-    
+
     // key 生成规则
     keyGeneration: {
-        style: 'snake_case', // or 'camelCase'
+        style: 'camelCase',
         maxLength: 32,
         prefix: '',
+        ai: {
+            enabled: false,
+            provider: 'deepseek',
+            model: 'deepseek-chat',
+            baseURL: 'https://api.deepseek.com/v1',
+            apiKey: ''
+        }
     },
+    
+    // 基本配置
+    sourceDir: './src',
+    localeDir: './src/locales',
+    sourceLang: 'zh-CN',
     
     // 备份设置
     backup: {

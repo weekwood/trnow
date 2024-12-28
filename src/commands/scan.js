@@ -82,15 +82,25 @@ const scanTemplate = (template) => {
     const attrRegex = /(?:label|message|placeholder|title|tooltip|alt|aria-label)=["']([^"']*[\u4e00-\u9fa5]+[^"']*)["']/g;
     
     // 增加对 v-text 和 v-html 的扫描
-    const vDirectiveRegex = /v-(?:text|html)=["']([^"']*[\u4e00-\u9fa5]+[^"']*)["']/g;
-    
-    // 增加对插值表达式的扫描 {{ xxx }}
-    const interpolationRegex = /{{[^}]*[\u4e00-\u9fa5]+[^}]*}}/g;
+    const vDirectiveRegex = /v-(?:text|html)=["']'?([^"']*[\u4e00-\u9fa5]+[^"']*)'?["']/g;
+    const bindRegex = /:(?:title|label|placeholder)=["']'?([^"']*[\u4e00-\u9fa5]+[^"']*)'?["']/g;
     
     let match;
     
     while ((match = attrRegex.exec(template)) !== null) {
         results.push(match[1]);
+    }
+
+    while ((match = vDirectiveRegex.exec(template)) !== null) {
+        // 移除引号
+        const text = match[1].replace(/^['"]|['"]$/g, '');
+        results.push(text);
+    }
+
+    while ((match = bindRegex.exec(template)) !== null) {
+        // 移除引号
+        const text = match[1].replace(/^['"]|['"]$/g, '');
+        results.push(text);
     }
 
     // 提取文本节点中的中文

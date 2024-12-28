@@ -3,6 +3,7 @@ const { Text, Box, useInput } = require('ink');
 const SelectInput = require('ink-select-input').default;
 const TextInput = require('ink-text-input').default;
 const Spinner = require('ink-spinner').default;
+const defaultConfig = require('../config/default');
 
 const App = ({ command, flags }) => {
     const [status, setStatus] = React.useState('idle');
@@ -31,22 +32,17 @@ const App = ({ command, flags }) => {
         {
             name: 'sourceDir',
             message: '源码目录路径:',
-            initial: './src'
+            initial: defaultConfig.sourceDir
         },
         {
             name: 'localeDir',
             message: '语言文件目录:',
-            initial: './src/locales'
+            initial: defaultConfig.localeDir
         },
         {
             name: 'sourceLang',
             message: '源语言:',
-            initial: 'zh-CN'
-        },
-        {
-            name: 'targetLangs',
-            message: '目标语言 (用逗号分隔):',
-            initial: 'en-US'
+            initial: defaultConfig.sourceLang
         },
         {
             name: 'keyStyle',
@@ -56,6 +52,27 @@ const App = ({ command, flags }) => {
                 { title: 'snake_case', value: 'snake_case' },
                 { title: 'camelCase', value: 'camelCase' }
             ]
+        },
+        {
+            name: 'enableAI',
+            message: '是否启用 AI 生成 key?',
+            type: 'select',
+            choices: [
+                { title: '否', value: false },
+                { title: '是', value: true }
+            ]
+        },
+        {
+            name: 'aiApiKey',
+            message: '请输入 DeepSeek API Key:',
+            when: answers => {
+                console.log('Checking aiApiKey condition:', {
+                    enableAI: answers.enableAI,
+                    shouldShow: answers.enableAI === true
+                });
+                return answers.enableAI === true;
+            },
+            initial: process.env.AI_API_KEY || ''
         }
     ];
 
@@ -173,48 +190,70 @@ const App = ({ command, flags }) => {
 
     const handleInitInput = (value) => {
         const currentStep = initSteps[initStep];
-        const answer = value || currentStep.initial;
-        const lastAnswer = answers[answers.length - 1];
-        if (lastAnswer && lastAnswer.message === currentStep.message) {
-            return;
-        }
-        
-        setInitAnswers(prev => ({
-            ...prev,
+        const answer = (value === '' ? currentStep.initial : value) ?? (
+            currentStep.type === 'select' 
+                ? currentStep.choices[0].value 
+                : currentStep.initial
+        );
+
+        const newAnswers = {
+            ...initAnswers,
             [currentStep.name]: answer
-        }));
+        };
+        setInitAnswers(newAnswers);
+
         setAnswers(prev => [
             ...prev,
             {
                 message: currentStep.message,
-                answer
+                answer,
+                initial: currentStep.type === 'select' 
+                    ? currentStep.choices[0].value 
+                    : currentStep.initial || answer
             }
         ]);
-        
+
+        if (currentStep.name === 'enableAI' && answer === false) {
+            finishInit(newAnswers);
+            return;
+        }
+
         if (initStep >= initSteps.length - 1) {
-            finishInit();
+            finishInit(newAnswers);
         } else {
             setInitStep(prev => prev + 1);
             setCurrentInput('');
         }
     };
 
-    const finishInit = async () => {
+    const finishInit = async (answers) => {
         safeSetState(() => setStatus('loading'));
-        const targetLangs = initAnswers.targetLangs?.split(',').filter(Boolean) || ['en-US'];
-        const keyStyle = initAnswers.keyStyle || 'snake_case';
-
-        console.log('Selected keyStyle:', keyStyle);
+        const keyStyle = answers.keyStyle || 'snake_case';
 
         const initResults = await require('../commands/init').execute({
             ...flags,
             config: flags.config,
-            sourceDir: initAnswers.sourceDir,
-            localeDir: initAnswers.localeDir,
-            sourceLang: initAnswers.sourceLang,
-            targetLangs,
-            keyStyle
+            sourceDir: answers.sourceDir,
+            localeDir: answers.localeDir,
+            sourceLang: answers.sourceLang,
+            keyStyle,
+            ai: {
+                enabled: answers.enableAI,
+                provider: 'deepseek',
+                model: 'deepseek-chat',
+                baseURL: 'https://api.deepseek.com/v1',
+                apiKey: answers.aiApiKey || ''
+            },
+            patterns: defaultConfig.patterns,
+            ignore: defaultConfig.ignore,
+            backup: defaultConfig.backup
         });
+
+        console.log('Generated config:', {
+            enabled: answers.enableAI,
+            apiKey: answers.aiApiKey
+        });
+
         safeSetState(() => setResults([{
             type: initResults.type,
             text: initResults.text
@@ -269,15 +308,26 @@ const App = ({ command, flags }) => {
                             <Box marginRight={1}>
                                 <Text color="green">✔</Text>
                             </Box>
-                            <Text color="gray">{answer.message} </Text>
-                            <Text color="cyan">{answer.answer}</Text>
+                            <Text>
+                                {answer.message}
+                                {answer.answer === answer.initial ? (
+                                    <Text color="gray"> ({answer.initial})</Text>
+                                ) : (
+                                    <Text color="cyan"> {answer.answer}</Text>
+                                )}
+                            </Text>
                         </Box>
                     ))}
                     <Box marginY={1}>
                         <Box marginRight={1}>
                             <Text color="cyan">?</Text>
                         </Box>
-                        <Text>{initSteps[initStep].message} </Text>
+                        <Text>
+                            {initSteps[initStep].message}
+                            {!currentInput && initSteps[initStep].initial && (
+                                <Text color="gray"> ({initSteps[initStep].initial})</Text>
+                            )}
+                        </Text>
                         {initSteps[initStep].type === 'select' ? (
                             <Text color="gray">
                                 {initSteps[initStep].choices[selectedChoice].title}
@@ -288,7 +338,7 @@ const App = ({ command, flags }) => {
                                 onChange={setCurrentInput}
                                 onSubmit={handleInitInput}
                                 showCursor={true}
-                                placeholder={initSteps[initStep].initial}
+                                placeholder=""
                             />
                         )}
                     </Box>
@@ -314,7 +364,7 @@ const App = ({ command, flags }) => {
             {status === 'done' && results.map((item, index) => {
                 switch (item.type) {
                     case 'error':
-                        return <Text key={index} color="red">✖ {item.text}</Text>;
+                        return <Text key={index} color="red"> {item.text}</Text>;
                     case 'success':
                         return <Text key={index} color="green">✔ {item.text}</Text>;
                     case 'info':

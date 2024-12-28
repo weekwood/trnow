@@ -37,50 +37,59 @@ const onCancel = () => {
     process.exit(0);
 };
 
-const execute = async (flags = {}) => {
-    const configPath = flags.config || '.trnow.yml';
+const generateConfig = (flags) => {
     const config = {
-        ...defaultConfig,
-        source: {
-            ...defaultConfig.source,
-            dir: flags.sourceDir || './src'
-        },
-        locales: {
-            ...defaultConfig.locales,
-            dir: flags.localeDir || './src/locales',
-            source: flags.sourceLang || 'zh-CN',
-            target: flags.targetLangs || ['en-US']
-        },
+        patterns: defaultConfig.patterns,
+        ignore: defaultConfig.ignore,
+        sourceDir: flags.sourceDir || './src',
+        localeDir: flags.localeDir || './src/locales',
+        sourceLang: 'zh-CN',
         keyGeneration: {
-            ...defaultConfig.keyGeneration,
-            style: flags.keyStyle || defaultConfig.keyGeneration.style
-        }
+            style: flags.keyStyle || 'camelCase',
+            ai: {
+                enabled: false,
+                provider: 'deepseek',
+                model: 'deepseek-chat',
+                baseURL: 'https://api.deepseek.com/v1',
+                apiKey: flags.ai?.apiKey || ''
+            }
+        },
+        backup: defaultConfig.backup
     };
 
-    // 打印调试信息
-    console.log('Saving config:', {
-        keyStyle: flags.keyStyle,
-        configKeyStyle: config.keyGeneration.style
-    });
+    // 如果启用了 AI，覆盖默认配置
+    if (flags.ai?.enabled) {
+        config.keyGeneration.ai = {
+            ...config.keyGeneration.ai,
+            enabled: true,
+            apiKey: flags.ai.apiKey
+        };
+    }
 
-    // 保存配置文件
-    await fs.outputFile(
-        configPath,
-        yaml.stringify(config),
-        'utf8'
-    );
+    return config;
+};
 
-    // 创建必要的目录
-    await fs.ensureDir(config.locales.dir);
-    await fs.ensureDir(defaultConfig.backup.dir);
+const execute = async (flags) => {
+    try {
+        const config = generateConfig(flags);
+        
+        // 写入配置文件
+        await fs.writeFile(
+            path.join(process.cwd(), '.trnow.yml'),
+            yaml.stringify(config),
+            'utf8'
+        );
 
-    // 更新 .gitignore
-    await updateGitignore();
-
-    return {
-        type: 'success',
-        text: `配置文件已创建: ${configPath}，并更新了 .gitignore\n\n接下来你可以运行 'trnow scan' 预览需要国际化的文本，或者直接运行 'trnow transform' 开始转换。`
-    };
+        return {
+            type: 'success',
+            text: `配置文件已生成：${path.join(process.cwd(), '.trnow.yml')}`
+        };
+    } catch (error) {
+        return {
+            type: 'error',
+            text: `生成配置文件失败：${error.message}`
+        };
+    }
 };
 
 module.exports = { execute }; 
