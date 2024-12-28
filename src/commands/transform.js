@@ -237,7 +237,10 @@ const execute = async (flags) => {
     // 为所有需要的文本生成 key
     const keyMap = new Map();
     textsNeedingKeys.forEach(text => {
-        const key = aiKeyMap.get(text) || generateFallbackKey(text, options.keyStyle);
+        // 如果 AI 未启用，直接使用 fallback
+        const key = config.keyGeneration.ai?.enabled 
+            ? (aiKeyMap.get(text) || generateFallbackKey(text, options.keyStyle))
+            : generateFallbackKey(text, options.keyStyle);
         keyMap.set(text, key);
     });
 

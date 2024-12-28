@@ -38,6 +38,26 @@ const execute = async (flags = {}) => {
 
     // 先收集所有文���
     const allTexts = new Set();
+    
+    // 进度相关
+    let currentProgress = 0;
+    const updateProgress = (phase, current, total) => {
+        // 扫描占 30%，AI 处理占 70%
+        const baseProgress = phase === 'scan' ? 0 : 30;
+        const phaseWeight = phase === 'scan' ? 0.3 : 0.7;
+        // 确保不超过阶段的最大进度
+        const phaseProgress = Math.min(current / total, 1) * 100 * phaseWeight;
+        currentProgress = baseProgress + phaseProgress;
+
+        if (typeof flags.onProgress === 'function') {
+            flags.onProgress({
+                type: 'progress',
+                text: phase === 'scan' ? '扫描文件中...' : '生成翻译 key 中...',
+                current: Math.round(currentProgress),
+                total: 100
+            });
+        }
+    };
 
     // 遍历所有文件
     const processFile = async (file) => {
@@ -81,15 +101,7 @@ const execute = async (flags = {}) => {
             }
         }
 
-        // 更新扫描进度
-        if (typeof flags.onProgress === 'function') {
-            flags.onProgress({
-                type: 'progress',
-                text: `扫描中: ${path.relative(process.cwd(), file)}`,
-                current: files.indexOf(file) + 1,
-                total: files.length
-            });
-        }
+        updateProgress('scan', files.indexOf(file) + 1, files.length);
     };
 
     // 并行处理所有文件
@@ -97,6 +109,14 @@ const execute = async (flags = {}) => {
 
     // 分批处理所有文本
     const textsArray = [...allTexts];
+    // 如果 AI 未启用，直接返回结果
+    if (!aiGenerator?.config?.enabled || !aiGenerator?.config?.apiKey) {
+        return {
+            results,
+            aiKeyMap
+        };
+    }
+
     const totalBatches = Math.ceil(textsArray.length / batchSize);
     for (let i = 0; i < textsArray.length; i += batchSize) {
         const batch = textsArray.slice(i, i + batchSize);
@@ -111,15 +131,7 @@ const execute = async (flags = {}) => {
             });
         }
         
-        // 更新 AI 处理进度
-        if (typeof flags.onProgress === 'function') {
-            flags.onProgress({
-                type: 'progress',
-                text: `AI 处理中: ${Math.min((i + batchSize) / textsArray.length * 100, 100).toFixed(1)}%`,
-                current: Math.min(i + batchSize, textsArray.length),
-                total: textsArray.length
-            });
-        }
+        updateProgress('ai', i + batchSize, textsArray.length);
     }
 
     if (results.length === 0) {
@@ -283,7 +295,7 @@ const scanJSX = (content) => {
     
     // 遍历 AST
     traverse(ast, {
-        // 处理 JSX 属性���的中文
+        // 处理 JSX 属性中的中文
         JSXAttribute(path) {
             const value = path.node.value;
             if (value && value.type === 'StringLiteral') {
