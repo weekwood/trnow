@@ -5,18 +5,36 @@ class AIKeyGenerator {
         this.config = config;
 
         this.batchSize = 20;
-        this.prompt = `为中文文本生成合适的国际化 key，要求：
-            1. 使用点号分隔的命名空间，如：
-               - common.form.username
-               - common.table.noData
-               - user.list.title
-               - user.form.submit
-            4. 使用 {style} 命名风格
-            5. 保持命名的一致性和语义化
-            7. 请严格按照以下格式返回每一行：
-              Text: "{text}" => Key: \`namespace.key_here\`
+        this.prompt = `为中文文本生成合适的国际化 key, 要求:
+            1. 使用点号分隔的命名空间, 根据文本内容智能判断:
+               - common: 通用文本
+                 * 包含"请", "输入"等词 -> common.input
+                 * 包含"提交", "确认"等词 -> common.button
+                 * 包含"标题", "名称"等词 -> common.label
+                 * 2-3个字的动作词 (如"删除", "编辑") -> common.button
+               - message: 消息提示
+                 * 包含"成功", "完成"等词 -> message.success
+                 * 包含"错误", "失败"等词 -> message.error
+                 * 包含"警告", "注意"等词 -> message.warning
+               - form: 表单相关
+                 * 包含"必填", "验证"等词 -> form.validation
+                 * 包含"请输入", "请选择"等词 -> form.placeholder
+               - table: 表格相关
+                 * 包含"列表", "表格"等词 -> table.title
+                 * 包含"暂无数据"等词 -> table.empty
+               - action: 操作相关
+                 * 包含"添加", "新增"等词 -> action.create
+                 * 包含"删除", "移除"等词 -> action.delete
+                 * 包含"编辑", "修改"等词 -> action.update
+               Note:
+               * 短文本 (2-3个字) 的动作词优先判断为按钮
+               * 动作词包括: 增, 删, 改, 查, 编辑, 修改, 添加, 新增, 删除, 保存等
+            2. 第三部分使用具体的动作或名词
+            3. 使用 {style} 命名风格
+            4. 请严格按照以下格式返回每一行:
+              Text: "{text}" => Key: \`namespace.type.name\`
 
-            文本列表：
+            文本列表:
             {text}`;
     }
 

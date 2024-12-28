@@ -4,11 +4,18 @@ const glob = require('glob');
 const { parse: vueParser } = require('@vue/compiler-sfc');
 const { parse: babelParser } = require('@babel/parser');
 const traverse = require('@babel/traverse').default;
+const AIKeyGenerator = require('../utils/ai-key-generator');
 
 const execute = async (flags = {}) => {
+    // 加载配置文件
+    const config = await require('./init').loadConfig(flags.config);
+
     const src = flags.src || './src';
 
     const results = [];
+    const aiGenerator = new AIKeyGenerator(config.keyGeneration?.ai);
+    const batchSize = aiGenerator.batchSize || 20;
+    const aiKeyMap = new Map();
 
     // 获取所有文件
     const files = glob.sync('**/*.{vue,js,jsx,tsx}', {
@@ -29,38 +36,89 @@ const execute = async (flags = {}) => {
         }];
     }
 
-    for (const file of files) {
+    // 先收集所有文���
+    const allTexts = new Set();
+
+    // 遍历所有文件
+    const processFile = async (file) => {
         if (file.match(/\.(jsx|tsx)$/)) {
             const content = await fs.readFile(file, 'utf-8');
-            const jsxResults = await scanJSX(content);
-            results.push(...jsxResults.map(text => ({
-                file: path.relative(process.cwd(), file),
-                text,
-                type: 'jsx'
-            })));
+            const jsxResults = scanJSX(content);
+            for (const { text, type } of jsxResults) {
+                results.push({
+                    file: path.relative(process.cwd(), file),
+                    text,
+                    type
+                });
+                allTexts.add(text);
+            }
         } else if (file.match(/\.vue$/)) {
             const content = await fs.readFile(file, 'utf-8');
             const { descriptor } = vueParser(content);
 
-            // 扫描模板中的文本
             if (descriptor.template) {
                 const templateResults = scanTemplate(descriptor.template.content);
-                results.push(...templateResults.map(text => ({
-                    file: path.relative(process.cwd(), file),
-                    text,
-                    type: 'template'
-                })));
+                for (const { text, type } of templateResults) {
+                    results.push({
+                        file: path.relative(process.cwd(), file),
+                        text,
+                        type
+                    });
+                    allTexts.add(text);
+                }
             }
 
-            // 扫描 script 中的文本
             if (descriptor.script) {
                 const scriptResults = scanScript(descriptor.script.content);
-                results.push(...scriptResults.map(text => ({
-                    file: path.relative(process.cwd(), file),
-                    text,
-                    type: 'script'
-                })));
+                for (const { text, type } of scriptResults) {
+                    results.push({
+                        file: path.relative(process.cwd(), file),
+                        text,
+                        type
+                    });
+                    allTexts.add(text);
+                }
             }
+        }
+
+        // 更新扫描进度
+        if (typeof flags.onProgress === 'function') {
+            flags.onProgress({
+                type: 'progress',
+                text: `扫描中: ${path.relative(process.cwd(), file)}`,
+                current: files.indexOf(file) + 1,
+                total: files.length
+            });
+        }
+    };
+
+    // 并行处理所有文件
+    await Promise.all(files.map(processFile));
+
+    // 分批处理所有文本
+    const textsArray = [...allTexts];
+    const totalBatches = Math.ceil(textsArray.length / batchSize);
+    for (let i = 0; i < textsArray.length; i += batchSize) {
+        const batch = textsArray.slice(i, i + batchSize);
+        await processAIBatch(batch, aiGenerator, flags, aiKeyMap);
+        
+        // 每个批次处理完后就更新文件
+        if (flags.onBatchComplete) {
+            await flags.onBatchComplete({
+                results,
+                aiKeyMap,
+                processedTexts: batch
+            });
+        }
+        
+        // 更新 AI 处理进度
+        if (typeof flags.onProgress === 'function') {
+            flags.onProgress({
+                type: 'progress',
+                text: `AI 处理中: ${Math.min((i + batchSize) / textsArray.length * 100, 100).toFixed(1)}%`,
+                current: Math.min(i + batchSize, textsArray.length),
+                total: textsArray.length
+            });
         }
     }
 
@@ -71,7 +129,10 @@ const execute = async (flags = {}) => {
         }];
     }
 
-    return results;
+    return {
+        results,
+        aiKeyMap
+    };
 };
 
 // 扫描模板中的中文文本
@@ -109,13 +170,16 @@ const scanTemplate = (template) => {
         results.push(match[1].trim());
     }
 
-    return results;
+    return results.map(text => ({
+        text,
+        type: 'template'
+    }));
 };
 
 // 扫描脚本中的中文文本
 const scanScript = (script) => {
     const results = [];
-    // 排除的模式
+    // 排除的式
     const excludePatterns = [
         /\/\/.*/,  // 单行注释
         /\/\*[\s\S]*?\*\//,  // 多行注释
@@ -137,7 +201,7 @@ const scanScript = (script) => {
     let processedScript = script.replace(/\/\*[\s\S]*?\*\//g, '')  // 多行注释
                                .replace(/\/\/.*/g, '');  // 单行注释
 
-    // 扫描字符串字面量中的中文
+    // 扫描字符字面量中的中文
     const stringRegex = /'([^']*[\u4e00-\u9fa5]+[^']*)'/g;
     const doubleStringRegex = /"([^"]*[\u4e00-\u9fa5]+[^"]*)"/g;
     let match;
@@ -161,7 +225,10 @@ const scanScript = (script) => {
         }
     }
 
-    return results;
+    return results.map(text => ({
+        text,
+        type: 'script'
+    }));
 };
 
 // 验证中文文本是否有效
@@ -177,7 +244,7 @@ const isValidChineseText = (text) => {
         /function/,  // 函数相关
         /\.(js|vue|ts|jsx|tsx)$/,  // 文件扩展名
         /^\w+:$/,  // 对象键名
-        /^[a-z]+[A-Z]\w*$/,  // 驼峰命名
+        /^[a-z]+[A-Z]\w*$/,  // 驼命名
         /^[A-Z][a-z]+\w*$/,  // Pascal 命名
         /^\$\w+$/,  // Vue 特殊属性
         /^v-\w+$/,  // Vue 指令
@@ -187,7 +254,7 @@ const isValidChineseText = (text) => {
         /^(components?|props?|data|methods|computed|watch|filters?|directives?)$/i,  // Vue 选项
     ];
 
-    // 如果匹配任何无效模式，返回 false
+    // 果匹配任何无效模式，返回 false
     if (invalidPatterns.some(pattern => pattern.test(text))) {
         return false;
     }
@@ -205,7 +272,7 @@ const isValidChineseText = (text) => {
     return chineseLength / totalLength > 0.5;
 };
 
-const scanJSX = async (content) => {
+const scanJSX = (content) => {
     const results = [];
     
     // 使用 Babel 解析 JSX
@@ -216,7 +283,7 @@ const scanJSX = async (content) => {
     
     // 遍历 AST
     traverse(ast, {
-        // 处理 JSX 属性中的中文
+        // 处理 JSX 属性���的中文
         JSXAttribute(path) {
             const value = path.node.value;
             if (value && value.type === 'StringLiteral') {
@@ -234,7 +301,7 @@ const scanJSX = async (content) => {
             }
         },
         
-        // 处理普通字符串中的中文
+        // 处理普通字符串的中文
         StringLiteral(path) {
             if (path.node.value.match(/[\u4e00-\u9fa5]/)) {
                 results.push(path.node.value);
@@ -242,7 +309,24 @@ const scanJSX = async (content) => {
         }
     });
     
-    return results;
+    return results.map(text => ({
+        text,
+        type: 'jsx'
+    }));
+};
+
+// 处理一个批次的文本
+const processAIBatch = async (batch, aiGenerator, flags, aiKeyMap) => {
+    if (!aiGenerator?.config?.enabled || !aiGenerator?.config?.apiKey) {
+        return;
+    }
+
+    const result = await aiGenerator.generateKeys(batch, flags.keyStyle);
+    if (result) {
+        for (const [text, key] of result.entries()) {
+            aiKeyMap.set(text, key);
+        }
+    }
 };
 
 module.exports = {

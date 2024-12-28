@@ -92,4 +92,23 @@ const execute = async (flags) => {
     }
 };
 
-module.exports = { execute }; 
+const loadConfig = async (configPath = '.trnow.yml') => {
+    const defaultConfig = require('../config/default');
+    try {
+        if (await fs.pathExists(configPath)) {
+            const content = await fs.readFile(configPath, 'utf-8');
+            return {
+                ...defaultConfig,
+                ...yaml.parse(content)
+            };
+        }
+    } catch (error) {
+        console.error('读取配置文件失败:', error);
+    }
+    return defaultConfig;
+};
+
+module.exports = {
+    execute,
+    loadConfig
+}; 

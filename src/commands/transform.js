@@ -4,23 +4,7 @@ const pinyin = require('pinyin').default;
 const jieba = require('@node-rs/jieba');
 const yaml = require('yaml');
 const AIKeyGenerator = require('../utils/ai-key-generator');
-
-// 加载配置文件
-const loadConfig = async (configPath = '.trnow.yml') => {
-    const defaultConfig = require('../config/default');
-    try {
-        if (await fs.pathExists(configPath)) {
-            const content = await fs.readFile(configPath, 'utf-8');
-            return {
-                ...defaultConfig,
-                ...yaml.parse(content)
-            };
-        }
-    } catch (error) {
-        console.error('读取配置文件失败:', error);
-    }
-    return defaultConfig;
-};
+const { loadConfig } = require('./init');
 
 // 加载已存在的语言文件
 const loadExistingMessages = async (flags) => {
@@ -138,7 +122,7 @@ const execute = async (flags) => {
     const config = await loadConfig(flags.config);
     console.log('Loaded config:', {
         aiEnabled: config.keyGeneration.ai?.enabled,
-        aiApiKey: config.keyGeneration.ai?.apiKey ? '***' : undefined
+        apiKey: config.keyGeneration.ai?.apiKey ? '***' : undefined
     });
 
     const aiGenerator = new AIKeyGenerator(config.keyGeneration.ai);
@@ -152,10 +136,58 @@ const execute = async (flags) => {
         keyStyle: flags.keyStyle || config.keyGeneration.style || 'snake_case'
     };
 
-    const scanResults = await require('./scan').execute(flags);
+    // 先加载已存在的语言文件
+    const existingMessages = await loadExistingMessages(options);
+
+    const scanResults = await require('./scan').execute({
+        ...flags,
+        onBatchComplete: async ({ results, aiKeyMap, processedTexts }) => {
+            // 为处理过的文本生成 key
+            const keyMap = new Map();
+            processedTexts.forEach(text => {
+                const key = aiKeyMap.get(text) || generateFallbackKey(text, options.keyStyle);
+                keyMap.set(text, key);
+            });
+
+            // 更新语言文件
+            const messages = {
+                ...existingMessages
+            };
+            
+            processedTexts.forEach(text => {
+                const key = keyMap.get(text);
+                if (key) {
+                    messages[key] = text;
+                }
+            });
+
+            // 保存更新后的语言文件
+            if (!flags.dryRun) {
+                await fs.outputJSON(
+                    path.join(options.localeDir, `${options.sourceLang}.json`),
+                    messages,
+                    { spaces: 2 }
+                );
+               
+                // 立即更新文件中的文本
+                for (const result of results) {
+                    if (result.text && processedTexts.includes(result.text)) {
+                        await replaceInFile({
+                            file: result.file,
+                            text: result.text,
+                            type: result.type
+                        }, keyMap);
+                    }
+                }
+            }
+           
+            // 更新 existingMessages 以供后续使用
+            Object.assign(existingMessages, messages);
+        }
+    });
     
     // 如果没有扫描结果或者是信息类型的消息，直接返回
-    if (!Array.isArray(scanResults) || scanResults.length === 0 || scanResults[0].type === 'info') {
+    if (!scanResults.results || scanResults.results.length === 0 || scanResults.results[0].type === 'info') {
         return {
             totalFiles: 0,
             totalTexts: 0,
@@ -164,15 +196,16 @@ const execute = async (flags) => {
         };
     }
 
-    // 添加对已存在的语言文件的处理
-    const existingMessages = await loadExistingMessages(options);
-    
+    // 使用 scan 阶段生成的 AI key
+    const aiKeyMap = scanResults.aiKeyMap || new Map();
+    const results = scanResults.results;
+
     // 添加对重复文本的处理
     const duplicateKeys = new Map();
     
     // 添加备份功能
     if (!flags.dryRun) {
-        const filesToBackup = [...new Set(scanResults.map(r => r.file))]
+        const filesToBackup = [...new Set(results.map(r => r.file))]
             .filter(Boolean)
             .map(file => path.resolve(process.cwd(), file));
         
@@ -192,7 +225,7 @@ const execute = async (flags) => {
     
     // 收集需要生成 key 的文本
     const textsNeedingKeys = [];
-    scanResults.forEach((item) => {
+    results.forEach((item) => {
         const existingEntry = Object.entries(existingMessages)
             .find(([_, value]) => value === item.text);
         
@@ -200,18 +233,6 @@ const execute = async (flags) => {
             textsNeedingKeys.push(item.text);
         }
     });
-
-    // 批量生成 key
-    let aiKeyMap = new Map();
-    if (textsNeedingKeys.length > 0 && config.keyGeneration.ai.enabled && config.keyGeneration.ai.apiKey) {
-        console.log('Using AI for key generation:', {
-            enabled: config.keyGeneration.ai.enabled,
-            hasApiKey: !!config.keyGeneration.ai.apiKey,
-            textsCount: textsNeedingKeys.length
-        });
-        aiKeyMap = await aiGenerator.generateKeys(textsNeedingKeys, options.keyStyle) || new Map();
-        console.log('AI key map:', aiKeyMap);
-    }
 
     // 为所有需要的文本生成 key
     const keyMap = new Map();
@@ -226,7 +247,7 @@ const execute = async (flags) => {
     };
     const existingKeys = new Set(Object.keys(existingMessages));
     
-    scanResults.forEach((item) => {
+    results.forEach((item) => {
         // 先检查文本是否已经存在
         const existingEntry = Object.entries(existingMessages)
             .find(([_, value]) => value === item.text);
@@ -255,7 +276,7 @@ const execute = async (flags) => {
         );
 
         // 替换文件中的文本
-        for (const file of scanResults) {
+        for (const file of results) {
             if (!file || !file.file) {
                 continue;
             }
@@ -264,8 +285,8 @@ const execute = async (flags) => {
                 flags.onProgress({
                     type: 'progress',
                     text: `正在处理: ${path.relative(process.cwd(), file.file)}`,
-                    current: scanResults.indexOf(file) + 1,
-                    total: scanResults.length
+                    current: results.indexOf(file) + 1,
+                    total: results.length
                 });
             }
             await replaceInFile(file, keyMap);
@@ -273,16 +294,16 @@ const execute = async (flags) => {
     }
 
     return {
-        totalFiles: new Set(scanResults.map(r => r.file)).size,
-        totalTexts: scanResults.length,
+        totalFiles: new Set(results.map(r => r.file)).size,
+        totalTexts: results.length,
         newKeys: report.newKeys.length,
-        processedFiles: scanResults.map(r => path.relative(process.cwd(), r.file)),
+        processedFiles: results.map(r => path.relative(process.cwd(), r.file)),
         messages,
         summary: {
             type: 'success',
             text: `转换完成！\n` +
-                  `- 处理文件数：${new Set(scanResults.map(r => r.file)).size}\n` +
-                  `- 替换文本数：${scanResults.length}\n` +
+                  `- 处理文件数：${new Set(results.map(r => r.file)).size}\n` +
+                  `- 替换文本数：${results.length}\n` +
                   `- 新增翻译：${report.newKeys.length}\n` +
                   `\n语言文件已更新，请检查 ${path.join(options.localeDir, `${options.sourceLang}.json`)}`
         }
@@ -316,7 +337,7 @@ const replaceInFile = async (file, keyMap) => {
                 `>{t('${key}')}<`
             );
             
-            // 替换字符串字面量
+            // 替换字符串面量
             newContent = newContent.replace(
                 `'${text}'`,
                 `t('${key}')`
@@ -330,7 +351,7 @@ const replaceInFile = async (file, keyMap) => {
                 new RegExp(`(\\w+)="` + text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + `"`, 'g'),
                 `:$1="$t('${key}')"`
             );
-            // 处理已经绑定属性的情况
+            // 处理已绑定属性的情况
             newContent = newContent.replace(
                 new RegExp(`:(\\w+)="` + text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + `"`, 'g'),
                 `:$1="$t('${key}')"`
