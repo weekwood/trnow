@@ -13,7 +13,8 @@ class AIKeyGenerator {
                - user.form.submit
             4. 使用 {style} 命名风格
             5. 保持命名的一致性和语义化
-            7. 直接返回 key，格式：Key: \`your_key_here\`
+            7. 请严格按照以下格式返回每一行：
+              Text: "{text}" => Key: \`namespace.key_here\`
 
             文本列表：
             {text}`;
@@ -21,17 +22,29 @@ class AIKeyGenerator {
 
     async generateKeys(texts, style) {
         if (!this.config?.enabled || !this.config?.apiKey || !this.config?.baseURL || !this.config?.model) {
+            console.log('AI config check failed:', {
+                enabled: this.config?.enabled,
+                hasApiKey: !!this.config?.apiKey,
+                hasBaseURL: !!this.config?.baseURL,
+                hasModel: !!this.config?.model
+            });
             return null;
         }
 
         try {
-            // 延迟创建 OpenAI 客户端
+            // 延迟创建 OpenAI 户端
             if (!this.client) {
                 this.client = new OpenAI({
                     apiKey: this.config.apiKey,
                     baseURL: this.config.baseURL
                 });
             }
+
+            console.log('Sending AI request:', {
+                texts,
+                style,
+                model: this.config.model
+            });
 
             // 使用配置文件中的 prompt
             const prompt = this.prompt
@@ -49,20 +62,29 @@ class AIKeyGenerator {
                 n: 1
             });
 
+            console.log('AI response:', response.choices[0].message.content);
+
             // 解析返回的结果
             const content = response.choices[0].message.content;
             const keyMap = new Map();
             
-            // 尝试从不同格式中提取 key
-            const keyMatches = content.match(/Key:\s*[`']([^`']+)[`']/i) ||
-                             content.match(/:\s*[`']([^`']+)[`']/);
-            
-            if (keyMatches) {
-                const key = keyMatches[1];
-                texts.forEach(text => {
-                    keyMap.set(text, this.normalizeKey(key, style));
-                });
-            }
+            // 按行处理每个文本
+            const lines = content.split('\n').filter(Boolean);
+            texts.forEach((text) => {
+                const line = lines.find(l => 
+                    l.includes(`Text: "${text}"`) || 
+                    l.includes(`Text: '${text}'`) ||
+                    // 移除序号后的文本匹配
+                    l.replace(/^\d+\.\s*/, '').includes(`Text: "${text}"`) ||
+                    l.replace(/^\d+\.\s*/, '').includes(`Text: '${text}'`)
+                );
+                if (line) {
+                    const keyMatch = line.match(/Key:\s*[`']([^`']+)[`']/i);
+                    if (keyMatch) {
+                        keyMap.set(text, this.normalizeKey(keyMatch[1], style));
+                    }
+                }
+            });
 
             return keyMap;
         } catch (error) {

@@ -104,20 +104,31 @@ const generateFallbackKey = (text, style = 'camelCase') => {
         return [...acc, ...processed];
     }, []);
     
+    // 根据文本内容判断命名空间
+    const getNamespace = (text) => {
+        if (text.includes('错误') || text.includes('异常')) {
+            return 'error';
+        }
+        if (text.includes('成功') || text.includes('完成')) {
+            return 'success';
+        }
+        if (text.includes('提示') || text.includes('警告')) {
+            return 'message';
+        }
+        return 'common';
+    };
+
     if (style === 'camelCase') {
-        return words
-            .map((word, index) => {
-                // 只处理首字母大小写，保持其余部分不变
-                if (index === 0) {
-                    return word.charAt(0).toLowerCase() + word.slice(1);
-                } else {
-                    return word.charAt(0).toUpperCase() + word.slice(1);
-                }
-            })
+        const key = words
+            .map((word, index) => 
+                index === 0 ? word.toLowerCase() : 
+                word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
+            )
             .join('');
+        return `${getNamespace(text)}.${key}`;
     }
     
-    return words.join('_');
+    return `${getNamespace(text)}.${words.join('_')}`;
 };
 
 const execute = async (flags) => {
@@ -125,6 +136,11 @@ const execute = async (flags) => {
     
     // 加载配置文件
     const config = await loadConfig(flags.config);
+    console.log('Loaded config:', {
+        aiEnabled: config.keyGeneration.ai?.enabled,
+        aiApiKey: config.keyGeneration.ai?.apiKey ? '***' : undefined
+    });
+
     const aiGenerator = new AIKeyGenerator(config.keyGeneration.ai);
     
     // 设置默认值
@@ -188,7 +204,13 @@ const execute = async (flags) => {
     // 批量生成 key
     let aiKeyMap = new Map();
     if (textsNeedingKeys.length > 0 && config.keyGeneration.ai.enabled && config.keyGeneration.ai.apiKey) {
+        console.log('Using AI for key generation:', {
+            enabled: config.keyGeneration.ai.enabled,
+            hasApiKey: !!config.keyGeneration.ai.apiKey,
+            textsCount: textsNeedingKeys.length
+        });
         aiKeyMap = await aiGenerator.generateKeys(textsNeedingKeys, options.keyStyle) || new Map();
+        console.log('AI key map:', aiKeyMap);
     }
 
     // 为所有需要的文本生成 key
@@ -308,7 +330,7 @@ const replaceInFile = async (file, keyMap) => {
                 new RegExp(`(\\w+)="` + text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + `"`, 'g'),
                 `:$1="$t('${key}')"`
             );
-            // 处理已经是绑定属性的情况
+            // 处理已经绑定属性的情况
             newContent = newContent.replace(
                 new RegExp(`:(\\w+)="` + text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + `"`, 'g'),
                 `:$1="$t('${key}')"`
